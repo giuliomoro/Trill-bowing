@@ -6,31 +6,21 @@
 #include <libraries/Scope/Scope.h>
 #include <libraries/math_neon/math_neon.h>
 
-#define NUM_TOUCH 5 // Number of touches on Trill sensor
+#define NUM_TOUCH 2 // Number of touches on Trill sensor
 
 // Trill object declaration
-Trill touchSensor;
+std::array<Trill,2> touchSensors;
 
-// Location of touches on Trill Bar
-float gTouchLocation[NUM_TOUCH] = { 0.0, 0.0, 0.0, 0.0, 0.0 };
-// Size of touches on Trill Bar
-float gTouchSize[NUM_TOUCH] = { 0.0, 0.0, 0.0, 0.0, 0.0 };
-
-float gLocationVelocity[NUM_TOUCH];
-float gSizeVelocity[NUM_TOUCH];
-
-// Number of active touches
-int gNumActiveTouches = 0;
+std::vector<std::array<float,NUM_TOUCH>> gLocationVelocities(touchSensors.size());
 
 // Sleep time for auxiliary task in microseconds
-unsigned int gTaskSleepTime = 5000; // microseconds
+unsigned int gTaskSleepTime = 2000; // microseconds
 
-OnePole freqFilt[NUM_TOUCH], ampFilt[NUM_TOUCH];
-float gCutOffFreq = 5, gCutOffAmp = 1;
+std::vector<std::array<OnePole,NUM_TOUCH>> ampFilts(touchSensors.size());
+float gCutOffAmp = 1;
 // Oscillators objects declaration
-Oscillator osc[NUM_TOUCH];
-// Range for oscillator frequency mapping
-float gFreqRange[2] = { 200.0, 1500.0 };
+std::vector<std::array<Oscillator,NUM_TOUCH>> oscs(touchSensors.size());
+
 // Range for oscillator amplitude mapping
 float gAmplitudeRange[2] = { 0.0, 1.0 } ;
 
@@ -39,83 +29,107 @@ void loop(void*)
 {
 	// number of frames to use for velocity computation.
 	// Larger numFrames means smoother velocity, smaller numFrames means more responsive velocity.
-	unsigned int numFrames = 4;
-	std::vector<float[NUM_TOUCH]> locations(numFrames);
-	std::vector<float[NUM_TOUCH]> sizes(numFrames);
+	enum { numFrames = 4};
+	std::vector<std::array<std::array<float,NUM_TOUCH>,numFrames>> locationss(touchSensors.size());
+	std::vector<std::array<std::array<float,NUM_TOUCH>,numFrames>> sizess(touchSensors.size());
+	for(auto& a : locationss)
+		for(auto& b : a)
+			for(auto& c : b)
+				c = 0;
+	for(auto& a : sizess)
+		for(auto& b : a)
+			for(auto& c : b)
+				c = 0;
+
 	unsigned int currentFrame = 0;
 	
 	size_t sinceLastChange = 0;
 	const size_t maxNoChange = 3; // after this many without a frame, scope.log a frame anyhow so the time on the scope keeps progressing
 	while(!Bela_stopRequested())
 	{
-		// Read locations from Trill sensor
-		touchSensor.readI2C();
-		gNumActiveTouches = touchSensor.getNumTouches();
-		for(unsigned int i = 0; i <  gNumActiveTouches; i++) {
-			gTouchLocation[i] = touchSensor.touchLocation(i);
-			gTouchSize[i] = touchSensor.touchSize(i);
-		}
-		// For all inactive touches, set location and size to 0
-		for(unsigned int i = gNumActiveTouches; i < NUM_TOUCH; i++) {
-			gTouchLocation[i] = 0.0;
-			gTouchSize[i] = 0.0;
-		}
-		// see if this is a new reading
-		bool changed = false;
-		for(unsigned int n = 0; n < NUM_TOUCH; ++n)
+		for(size_t t = 0; t < touchSensors.size(); ++t)
 		{
-			if(sizes[currentFrame][n] != gTouchSize[n] || locations[currentFrame][n] != gTouchLocation[n])
-			{
-				changed = true;
-				sinceLastChange = 0;
-				break;
-			}
-		}
-		if(!changed)
-		{
-			if(maxNoChange == sinceLastChange)
-			{
-				sinceLastChange = 0;
-				changed = true;
-			}
-			sinceLastChange++;
-		}
-		if(changed)
-		{
-			currentFrame = (currentFrame + 1) % sizes.size();
-			// store the current frame
-			for(unsigned int n = 0; n < NUM_TOUCH; ++n)
-			{
-				// copy always all of them: we want as much information as possible to be able to detect a change
-				sizes[currentFrame][n] = gTouchSize[n];
-				locations[currentFrame][n] = gTouchLocation[n];
-			}
-			size_t oldestFrame = (currentFrame + 1) % sizes.size();
-			
-			// calculate velocity across frames
-			for(unsigned int n = 0; n < NUM_TOUCH; ++n)
-			{
-				// this loop could be limited to n = 1 if you only want velocity from one touch
+			auto& touchSensor = touchSensors[t];
+			auto& locations = locationss[t];
+			auto& sizes = sizess[t];
+			auto& gLocationVelocity = gLocationVelocities[t];
+			if(Trill::NONE == touchSensor.deviceType())
+				continue;
 
-				// check if we are on an onset or offset for current touch
-				bool onset = sizes[currentFrame][n] && !sizes[oldestFrame][n];
-				bool offset = !sizes[currentFrame][n] && sizes[oldestFrame][n];
-				if(onset || offset)
+			// Read locations from Trill sensor
+			touchSensor.readI2C();
+			// see if this is a new reading
+			bool changed = false;
+			for(unsigned int n = 0; n < NUM_TOUCH; ++n)
+			{
+				if(sizes[currentFrame][n] != touchSensor.touchSize(n) || locations[currentFrame][n] != touchSensor.touchLocation(n))
 				{
-					// remove artefacts due to onset/offset: set all frames to the current value
-					// this way velocity goes to 0 for this frame.
-					// For onset, successive frames will use this as a reference for computing velocity,
-					// giving the physical equivalent of starting from velocity 0, which is reasonable
-					for(unsigned int i = 0; i < sizes.size(); ++i)
-					{
-						sizes[i][n] = sizes[currentFrame][n];
-						locations[i][n] = locations[currentFrame][n];
-					}
+					changed = true;
+					sinceLastChange = 0;
+					break;
 				}
-				gSizeVelocity[n] = sizes[currentFrame][n] - sizes[oldestFrame][n];
-				gLocationVelocity[n] = locations[currentFrame][n] - locations[oldestFrame][n];
 			}
-			// printf("%6.3f %6.3f\n", gLocationVelocity[0], gSizeVelocity[0]);
+			if(!changed)
+			{
+				if(maxNoChange == sinceLastChange)
+				{
+					sinceLastChange = 0;
+					changed = true;
+				}
+				sinceLastChange++;
+			}
+			if(changed)
+			{
+				currentFrame = (currentFrame + 1) % sizes.size();
+				// store the current frame
+				for(unsigned int n = 0; n < NUM_TOUCH; ++n)
+				{
+					// copy always all of them: we want as much information as possible to be able to detect a change
+					sizes[currentFrame][n] = touchSensor.touchSize(n);
+					locations[currentFrame][n] = touchSensor.touchLocation(n);
+				}
+				size_t oldestFrame = (currentFrame + 1) % sizes.size();
+
+				// calculate velocity across frames
+				for(unsigned int n = 0; n < NUM_TOUCH; ++n)
+				{
+					// this loop could be limited to n = 1 if you only want velocity from one touch
+
+					// check if we are on an onset or offset for current touch
+					bool onset = sizes[currentFrame][n] && !sizes[oldestFrame][n];
+					bool offset = !sizes[currentFrame][n] && sizes[oldestFrame][n];
+					if(onset || offset)
+					{
+						// remove artefacts due to onset/offset: set all frames to the current value
+						// this way velocity goes to 0 for this frame.
+						// For onset, successive frames will use this as a reference for computing velocity,
+						// giving the physical equivalent of starting from velocity 0, which is reasonable
+						for(unsigned int i = 0; i < sizes.size(); ++i)
+						{
+							sizes[i][n] = sizes[currentFrame][n];
+							locations[i][n] = locations[currentFrame][n];
+						}
+					}
+					//gSizeVelocity[n] = sizes[currentFrame][n] - sizes[oldestFrame][n];
+					if(n < touchSensor.getNumTouches())
+					{
+						float newL = locations[currentFrame][n];
+						float oldL = locations[oldestFrame][n];
+						if(Trill::RING == touchSensor.deviceType())
+						{
+							// wrap around
+							if(newL > 0.9 && oldL < 0.1)
+								oldL += 1;
+							else if(newL < 0.1 && oldL > 0.9)
+								newL += 1;
+						}
+						gLocationVelocity[n] = newL - oldL;
+					}
+					else
+						gLocationVelocity[n] = 0;
+				}
+				// printf("%6.3f %6.3f\n", gLocationVelocity[0], gSizeVelocity[0]);
+			}
 		}
 		usleep(gTaskSleepTime);
 	}
@@ -125,22 +139,34 @@ bool setup(BelaContext *context, void *userData)
 {
 	scope.setup(4, context->audioSampleRate); // assuming approx 10ms sampling period
 	// Setup a Trill Bar sensor on i2c bus 1, using the default mode and address
-	if(touchSensor.setup(1, Trill::BAR, 0x20) != 0) {
+	if(touchSensors[0].setup(1, Trill::BAR, 0x20) != 0)
 		fprintf(stderr, "Unable to initialise Trill Bar\n");
-		return false;
-	}
-	touchSensor.printDetails();
-	// Set and schedule auxiliary task for reading sensor data from the I2C bus
-	Bela_runAuxiliaryTask(loop);
+	if(touchSensors[1].setup(1, Trill::RING, 0x3b) != 0)
+		fprintf(stderr, "Unable to initialise Trill Ring\n");
+#if 0
+	if(touchSensors[1].setup(1, Trill::RING) != 0)
+		fprintf(stderr, "Unable to initialise Trill Ring\n");
+#endif
+	for(auto& touchSensor : touchSensors)
+		touchSensor.printDetails();
 
 	// For each possible touch...
-	for(unsigned int i = 0; i < NUM_TOUCH; i++) {
-		// Setup corresponding oscillator
-		osc[i].setup(context->audioSampleRate, Oscillator::sine);
-		// Setup low pass filters for smoothing frequency and amplitude
-		freqFilt[i].setup(gCutOffFreq, context->audioSampleRate);
-		ampFilt[i].setup(gCutOffAmp, context->audioSampleRate);
+	for(unsigned int t = 0; t < touchSensors.size(); ++t)
+	{
+		auto& osc = oscs[t];
+		auto& ampFilt = ampFilts[t];
+		for(auto& v : gLocationVelocities[t])
+			v = 0;
+		for(unsigned int i = 0; i < NUM_TOUCH; i++) {
+			// Setup corresponding oscillator
+			osc[i].setup(context->audioSampleRate, Oscillator::sine);
+			// Setup low pass filters for smoothing frequency and amplitude
+			ampFilt[i].setup(gCutOffAmp, context->audioSampleRate);
+		}
 	}
+
+	// Set and schedule auxiliary task for reading sensor data from the I2C bus
+	Bela_runAuxiliaryTask(loop);
 
 	return true;
 }
@@ -161,18 +187,26 @@ void render(BelaContext *context, void *userData)
 		static int count = 0;
 		count++;
 		float logs[4];
-		for(unsigned int i = 0; i < NUM_TOUCH; i++) {
-			float frequency, amplitude;
-			frequency = 500 * (1 + i);
-			amplitude = map(fabs(gLocationVelocity[i]), 0, 0.1, gAmplitudeRange[0], gAmplitudeRange[1]);
-			amplitude = ampFilt[i].process(amplitude);
-			float sine = tanhf_neon(amplitude * osc[i].process(frequency));
-			if(i < 2)
-			{
-				logs[i * 2] = amplitude;
-				logs[i * 2 + 1] = sine;
+		for(unsigned int t = 0; t < touchSensors.size(); ++t)
+		{
+			//auto& touchSensor = touchSensors[t];
+			auto& gLocationVelocity = gLocationVelocities[t];
+			auto& ampFilt = ampFilts[t];
+			auto& osc = oscs[t];
+
+			for(unsigned int i = 0; i < NUM_TOUCH; i++) {
+				float frequency, amplitude;
+				frequency = (200 + (200 * (t + 1))) * (1 + i);
+				amplitude = map(fabs(gLocationVelocity[i]), 0, 0.2, gAmplitudeRange[0], gAmplitudeRange[1]);
+				amplitude = ampFilt[i].process(amplitude);
+				float sine = tanhf_neon(amplitude * osc[i].process(frequency));
+				if(i < 2)
+				{
+					logs[i * 2] = amplitude;
+					logs[i * 2 + 1] = sine;
+				}
+				out += sine / 3.f;
 			}
-			out += sine / 3.f;
 		}
 		scope.log(logs);
 
